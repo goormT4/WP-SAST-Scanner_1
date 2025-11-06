@@ -17,10 +17,13 @@ on:
       - '.semgrep.yml'
 
 permissions:
-  contents: read
+  contents: write          # ← reports/ 커밋을 위해 write 권한
   security-events: write
   pull-requests: write
 
+env:
+  REPORTS_DIR: reports
+  TS: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
 jobs:
   semgrep:
     runs-on: ubuntu-latest
@@ -94,12 +97,40 @@ jobs:
           c.save()
           PY
 
-      # --- PDF/원본 결과 업로드 ---
+      
+      - name: Ensure reports/ directory
+        run: |
+          mkdir -p "$REPORTS_DIR"
+
+      - name: Move outputs into reports/
+        run: |
+          pdf_name="Semgrep-Report_${{ env.TS }}.pdf"
+          sarif_name="semgrep_${{ env.TS }}.sarif"
+          mv Semgrep-Report.pdf "$REPORTS_DIR/$pdf_name" || true
+          mv semgrep.sarif "$REPORTS_DIR/$sarif_name" || true
+          echo "PDF=$REPORTS_DIR/$pdf_name" >> $GITHUB_OUTPUT
+          echo "SARIF=$REPORTS_DIR/$sarif_name" >> $GITHUB_OUTPUT
+
+      # PR이 아닌 'push' 이벤트에서만 레포에 커밋/푸시
+      - name: Commit reports back to repo
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$REPORTS_DIR" || true
+          git commit -m "chore(reports): add Semgrep report [skip ci]" || echo "nothing to commit"
+          git push
+
+      # (여전히 Actions 아티팩트로도 제공)
       - name: Upload artifacts (PDF & SARIF)
         uses: actions/upload-artifact@v4
         with:
           name: semgrep-report
           path: |
-            Semgrep-Report.pdf
-            semgrep.sarif
+            ${{ env.REPORTS_DIR }}/*.pdf
+            ${{ env.REPORTS_DIR }}/*.sarif
           if-no-files-found: warn
+
+      - name: Prune old reports (keep last 20)
+        run: python scripts/prune_reports.py
+
