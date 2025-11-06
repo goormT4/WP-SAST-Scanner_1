@@ -1,133 +1,106 @@
-name: Semgrep (with PDF report)
+name: Semgrep
 
 on:
   push:
     branches: [ main, master, develop ]
-    paths:
-      - 'src/wp_plugins/**'
-      - '.semgrep/**'
-      - '.semgrep.yml'
-      - '.github/workflows/semgrep.yml'
   pull_request:
-    types: [opened, synchronize, reopened]
     branches: [ main, master, develop ]
-    paths:
-      - 'src/wp_plugins/**'
-      - '.semgrep/**'
-      - '.semgrep.yml'
 
 permissions:
-  contents: write          # ← reports/ 커밋을 위해 write 권한
+  contents: read
   security-events: write
   pull-requests: write
 
-env:
-  REPORTS_DIR: reports
-  TS: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
 jobs:
   semgrep:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-
-      - name: Ensure Python (for PDF)
-        uses: actions/setup-python@v5
-        with: { python-version: '3.x' }
-
-      - name: Install deps for PDF
-        run: |
-          python -m pip install --upgrade pip
-          pip install reportlab
-
-      - name: List semgrep configs
-        run: |
-          ls -la .semgrep || true
-          test -f .semgrep/.semgrep.yml && sed -n '1,120p' .semgrep/.semgrep.yml || true
-
-      # --- Semgrep (Cloud mode) ---
-      - name: Run Semgrep via Semgrep Cloud
-        if: env.SEMGREP_APP_TOKEN != ''
-        uses: semgrep/semgrep-action@v1
         with:
-          config: ".semgrep/.semgrep.yml"
-          generateSarif: "1"
-          sarifFile: semgrep.sarif
-          comment: true
-          include: |
-            src/wp_plugins/**
-          exclude: |
-            node_modules
-            vendor
-            .git
-            .github
-        continue-on-error: true   # ❗️실패해도 다음 단계 진행
+          fetch-depth: 0
 
-      # --- Semgrep (CLI fallback) ---
-      - name: Install Semgrep (CLI)
-        if: env.SEMGREP_APP_TOKEN == ''
-        run: pip install semgrep
-
-      - name: Run Semgrep (CLI -> SARIF)
-        if: env.SEMGREP_APP_TOKEN == ''
+      # (디버그) 실제로 어떤 PHP 파일을 스캔하는지 보여주기
+      - name: List PHP files
         run: |
-          CONFIG=".semgrep/.semgrep.yml"
-          if [ ! -f "$CONFIG" ]; then CONFIG="auto"; fi
-          semgrep --config "$CONFIG" \
-            --include 'src/wp_plugins/**' \
-            --exclude node_modules --exclude vendor --exclude .git --exclude .github \
-            --sarif --output semgrep.sarif || true   # ❗️어떤 코드여도 계속
+          echo "Repo root: $PWD"
+          find . -type f -name "*.php" | head -n 200
+          echo "Total PHP files:"
+          find . -type f -name "*.php" | wc -l
 
-      # --- PDF 생성 스텝 ---
-      - name: Generate PDF report from SARIF
+      # Semgrep 설치 (Cloud 토큰 없이 CLI로 고정)
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install Semgrep & jq
         run: |
-          python scripts/sarif_to_pdf.py semgrep.sarif "Semgrep-Report.pdf" || python - <<'PY'
-          # 백업: sarif 파일 없을 때 빈 보고서라도 생성
-          from reportlab.lib.pagesizes import A4
-          from reportlab.pdfgen import canvas
-          c = canvas.Canvas("Semgrep-Report.pdf", pagesize=A4)
-          c.setTitle("Semgrep Report")
-          c.drawString(50, 800, "Semgrep Report")
-          c.drawString(50, 780, "No SARIF produced. (scan failed or no results output)")
-          c.save()
-          PY
+          pip install --upgrade pip semgrep
+          sudo apt-get update && sudo apt-get install -y jq
 
-      
-      - name: Ensure reports/ directory
+      # 스캔 실행: JSON + SARIF 동시 생성 (알럿 없어도 성공 종료)
+      - name: Run Semgrep (JSON + SARIF)
         run: |
-          mkdir -p "$REPORTS_DIR"
+          # .semgrep.yml 있으면 사용, 없으면 auto
+          if [ -f ".semgrep.yml" ]; then
+            CONFIG="--config .semgrep.yml"
+          else
+            CONFIG="--config p/php --config p/security-audit --config p/secrets"
+          fi
 
-      - name: Move outputs into reports/
+          mkdir -p reports
+
+          # --error 는 ‘알럿 있을 때 실패’라 지금은 제거 (리포트만 만들기)
+          semgrep $CONFIG \
+            --metrics=off \
+            --timeout 10 \
+            --json --output reports/semgrep.json \
+            --sarif --output reports/semgrep.sarif || true
+
+      # GitHub Actions Job Summary(런 로그 위 상단)에 항상 요약 쓰기
+      - name: Write Markdown Summary
+        if: always()
         run: |
-          pdf_name="Semgrep-Report_${{ env.TS }}.pdf"
-          sarif_name="semgrep_${{ env.TS }}.sarif"
-          mv Semgrep-Report.pdf "$REPORTS_DIR/$pdf_name" || true
-          mv semgrep.sarif "$REPORTS_DIR/$sarif_name" || true
-          echo "PDF=$REPORTS_DIR/$pdf_name" >> $GITHUB_OUTPUT
-          echo "SARIF=$REPORTS_DIR/$sarif_name" >> $GITHUB_OUTPUT
+          echo "## 🧪 Semgrep Summary" >> $GITHUB_STEP_SUMMARY
 
-      # PR이 아닌 'push' 이벤트에서만 레포에 커밋/푸시
-      - name: Commit reports back to repo
-        if: github.event_name == 'push'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$REPORTS_DIR" || true
-          git commit -m "chore(reports): add Semgrep report [skip ci]" || echo "nothing to commit"
-          git push
+          if [ -s reports/semgrep.json ]; then
+            TOTAL=$(jq '.results | length' reports/semgrep.json)
+            echo "- Total findings: **$TOTAL**" >> $GITHUB_STEP_SUMMARY
 
-      # (여전히 Actions 아티팩트로도 제공)
-      - name: Upload artifacts (PDF & SARIF)
+            # 심각도별 집계 (없으면 0)
+            for sev in ERROR WARNING INFO; do
+              COUNT=$(jq --arg sev "$sev" '[.results[] | select(.extra.severity==$sev)] | length' reports/semgrep.json)
+              echo "  - $sev: **$COUNT**" >> $GITHUB_STEP_SUMMARY
+            done
+
+            # 상위 10개 룰/파일 미니 테이블
+            echo -e "\n### Top findings\n" >> $GITHUB_STEP_SUMMARY
+            jq -r '
+              .results[]
+              | {check_id, path: .path, start: .start.line, message: .extra.message, severity: .extra.severity}
+              | "| \(.severity) | \(.check_id) | \(.path):\(.start) | \(.message | gsub("\\n"; " ")) |"
+            ' reports/semgrep.json | head -n 10 >> $GITHUB_STEP_SUMMARY
+
+            echo -e "\n_(showing up to 10)_\n" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- Semgrep produced no JSON (likely no files matched). Check the **List PHP files** step above." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # Code Scanning에 SARIF 업로드 (알럿 0이어도 업로드 시도)
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: reports/semgrep.sarif
+
+      # 리포트 파일 보존(다운로드용)
+      - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: semgrep-report
-          path: |
-            ${{ env.REPORTS_DIR }}/*.pdf
-            ${{ env.REPORTS_DIR }}/*.sarif
+          name: semgrep-reports
+          path: reports/*
           if-no-files-found: warn
-
+          retention-days: 14
