@@ -106,14 +106,21 @@ jobs:
           exit $RET
 
 
+      #위치 확
+      - name: Check files
+        run: |
+          pwd
+          ls -R .
+
 
       # SARIF 출력 (에러 숨김 없음)
       - name: Semgrep SARIF
         run: |
           set -e
-          semgrep scan --config "$CONFIG" \
+          semgrep scan --config ".semgrep/.semgrep.yml" \
             --metrics=off --timeout 10 \
             --sarif -o reports/semgrep.sarif
+
 
       # GitHub Actions Job Summary에 항상 요약 출력
       - name: Write Markdown Summary
