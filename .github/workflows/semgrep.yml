@@ -60,6 +60,50 @@ jobs:
             head -n 20 "$CONFIG_FILE"
           fi
 
+      - name: Semgrep debug run (capture stdout/stderr & env)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports debug_out
+
+          echo "CONFIG='$CONFIG'"
+          echo "Working dir: $PWD"
+          echo "List .semgrep dir:"
+          ls -la .semgrep || true
+          echo "List top of rules dir:"
+          head -n 80 .semgrep/*.yml || true
+
+          # show first 200 lines of config file if exists
+          if [ -f "$CONFIG" ]; then
+            echo "---- CONFIG content ----"
+            sed -n '1,200p' "$CONFIG" || true
+            echo "---- end CONFIG ----"
+          fi
+
+          # force utf-8 environment
+          export LC_ALL=en_US.UTF-8
+          export LANG=en_US.UTF-8
+          export PYTHONUTF8=1
+
+          # run semgrep with debug capture
+          semgrep scan --config "$CONFIG" --metrics=off --timeout 60 --json -o reports/semgrep.json --debug > debug_out/semgrep.out 2> debug_out/semgrep.err || true
+
+          echo "---- semgrep.out (tail 200) ----"
+          tail -n 200 debug_out/semgrep.out || true
+          echo "---- semgrep.err (tail 200) ----"
+          tail -n 200 debug_out/semgrep.err || true
+
+          echo "reports directory listing:"
+          ls -la reports || true
+          echo "reports/semgrep.json exists?:" $( [ -f reports/semgrep.json ] && echo yes || echo no )
+
+          # Print any Python Unicode errors in stderr explicitly
+          grep -i "UnicodeDecodeError" debug_out/semgrep.err || true
+          # Print any "unable to find a config" lines
+          grep -i "unable to find a config\|path .* does not exist\|invalid configuration file" debug_out/semgrep.err || true
+
+
+
       - name: Run Semgrep JSON scan
         shell: bash
         run: |
