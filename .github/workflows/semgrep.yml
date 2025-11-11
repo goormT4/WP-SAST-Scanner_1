@@ -125,6 +125,18 @@ jobs:
           grep -i "unable to find a config\|path .* does not exist\|invalid configuration file" debug_out/semgrep.err || true
 
 
+          # semgrep이 "Saved rules to /tmp/semgrep-*.rules" 라고 찍은 파일을 찾아서 출력
+          TMPF=$(ls /tmp/semgrep-*.rules 2>/dev/null | head -n1 || true)
+          if [ -n "$TMPF" ]; then
+            echo "TMP rules file: $TMPF"
+            echo "---- head of tmp rules (1-200 lines) ----"
+            sed -n '1,200p' "$TMPF" || true
+            echo "---- show first non-empty tokens (line numbers) ----"
+            nl -ba "$TMPF" | sed -n '1,60p'
+          else
+            echo "No /tmp/semgrep-*.rules file found"
+          fi
+
 
       - name: Run Semgrep JSON scan
         shell: bash
