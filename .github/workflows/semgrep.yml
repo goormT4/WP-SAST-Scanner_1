@@ -40,17 +40,21 @@ jobs:
       - name: Prepare config & reports dir
         run: |
           set -euo pipefail
-
-          # .semgrep config 선택
+          CONFIG_FILES=""
           if [ -f ".semgrep/packs-only.yml" ]; then
-            CONFIG_FILE=".semgrep/packs-only.yml"
-          elif [ -f ".semgrep/local-rules.yml" ]; then
-            CONFIG_FILE=".semgrep/local-rules.yml"
-          else
-            CONFIG_FILE="auto"
+            CONFIG_FILES+="--config .semgrep/packs-only.yml "
+          fi
+          if [ -f ".semgrep/local-rules.yml" ]; then
+            CONFIG_FILES+="--config .semgrep/local-rules.yml "
           fi
 
-          echo "CONFIG=$CONFIG_FILE" >> "$GITHUB_ENV"
+          # 둘 다 없으면 auto fallback
+          if [ -z "$CONFIG_FILES" ]; then
+            CONFIG_FILES="--config p/php --config p/javascript"
+          fi
+
+          echo "CONFIG_FILES=$CONFIG_FILES" >> "$GITHUB_ENV"
+
           mkdir -p reports
           echo "== CONFIG chosen =="
           echo "$CONFIG_FILE"
