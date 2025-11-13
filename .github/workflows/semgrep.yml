@@ -1,10 +1,10 @@
-name: WP Semgrep Scan
+name: Semgrep
 
 on:
   push:
-    branches: [main, master, develop]
+    branches: [ main, master, develop ]
   pull_request:
-    branches: [main, master, develop]
+    branches: [ main, master, develop ]
 
 permissions:
   contents: read
@@ -14,10 +14,10 @@ permissions:
 jobs:
   semgrep:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -25,10 +25,9 @@ jobs:
       - name: List PHP files
         run: |
           echo "Repo root: $PWD"
-          find src/wp_plugins -type f -name "*.php" | head -n 20
+          find . -type f -name "*.php" | head -n 200
           echo "Total PHP files:"
-          find src/wp_plugins -type f -name "*.php" | wc -l
-
+          find . -type f -name "*.php" | wc -l
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -38,21 +37,119 @@ jobs:
         run: |
           pip install --upgrade pip semgrep
           sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Prepare reports dir
-        run: mkdir -p reports
-
-      - name: Run Semgrep scan
+      - name: Prepare config & reports dir
         run: |
-          semgrep scan \
-            --config .semgrep/packs-only.yml \
-            --config .semgrep/local-rules.yml \
-            --metrics=off \
-            --timeout 120 \
-            --json -o reports/semgrep.json src/wp_plugins
+          set -euo pipefail
 
+          # .semgrep config 선택
+          if [ -f ".semgrep/packs-only.yml" ]; then
+            CONFIG_FILE=".semgrep/packs-only.yml"
+          elif [ -f ".semgrep/local-rules.yml" ]; then
+            CONFIG_FILE=".semgrep/local-rules.yml"
+          else
+            CONFIG_FILE="auto"
+          fi
+
+          echo "CONFIG=$CONFIG_FILE" >> "$GITHUB_ENV"
+          mkdir -p reports
+          echo "== CONFIG chosen =="
+          echo "$CONFIG_FILE"
+          echo "== List .semgrep dir (if any) =="
+          ls -la .semgrep || true
+          echo "== Show config (first 20 lines) =="
+          if [ -f "$CONFIG_FILE" ]; then
+            head -n 20 "$CONFIG_FILE"
+          fi
+      - name: Normalize .semgrep rule files (remove BOM / ensure UTF-8)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d ".semgrep" ]; then
+            echo "Normalizing .semgrep/*.yml files (remove BOM if present)"
+            for f in .semgrep/*.yml; do
+              [ -f "$f" ] || continue
+              # show first bytes for debug (optional)
+              head -c 4 "$f" | xxd || true
+              # remove BOM (EF BB BF) if present
+              sed -i '1s/^\xEF\xBB\xBF//' "$f"
+              # ensure file is UTF-8 (convert if needed) — optional fallback
+              # iconv -f cp949 -t utf-8 "$f" -o "${f}.utf8" && mv "${f}.utf8" "$f" || true
+            done
+          else
+            echo ".semgrep directory not present, skipping normalization"
+          fi
+      - name: Semgrep debug run (capture stdout/stderr & env)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports debug_out
+          echo "CONFIG='$CONFIG'"
+          echo "Working dir: $PWD"
+          echo "List .semgrep dir:"
+          ls -la .semgrep || true
+          echo "List top of rules dir:"
+          head -n 80 .semgrep/*.yml || true
+          # show first 200 lines of config file if exists
+          if [ -f "$CONFIG" ]; then
+            echo "---- CONFIG content ----"
+            sed -n '1,200p' "$CONFIG" || true
+            echo "---- end CONFIG ----"
+          fi
+          # force utf-8 environment
+          export LC_ALL=en_US.UTF-8
+          export LANG=en_US.UTF-8
+          export PYTHONUTF8=1
+          # run semgrep with debug capture
+          semgrep scan --config "$CONFIG" --metrics=off --timeout 60 --json -o reports/semgrep.json --debug > debug_out/semgrep.out 2> debug_out/semgrep.err || true
+          echo "---- semgrep.out (tail 200) ----"
+          tail -n 200 debug_out/semgrep.out || true
+          echo "---- semgrep.err (tail 200) ----"
+          tail -n 200 debug_out/semgrep.err || true
+          echo "reports directory listing:"
+          ls -la reports || true
+          echo "reports/semgrep.json exists?:" $( [ -f reports/semgrep.json ] && echo yes || echo no )
+          # Print any Python Unicode errors in stderr explicitly
+          grep -i "UnicodeDecodeError" debug_out/semgrep.err || true
+          # Print any "unable to find a config" lines
+          grep -i "unable to find a config\|path .* does not exist\|invalid configuration file" debug_out/semgrep.err || true
+          # semgrep이 "Saved rules to /tmp/semgrep-*.rules" 라고 찍은 파일을 찾아서 출력
+          TMPF=$(ls /tmp/semgrep-*.rules 2>/dev/null | head -n1 || true)
+          if [ -n "$TMPF" ]; then
+            echo "TMP rules file: $TMPF"
+            echo "---- head of tmp rules (1-200 lines) ----"
+            sed -n '1,200p' "$TMPF" || true
+            echo "---- show first non-empty tokens (line numbers) ----"
+            nl -ba "$TMPF" | sed -n '1,60p'
+          else
+            echo "No /tmp/semgrep-*.rules file found"
+          fi
+      - name: Run Semgrep JSON scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LC_ALL=en_US.UTF-8
+          export LANG=en_US.UTF-8
+          export PYTHONUTF8=1
+          mkdir -p reports
+          if [ "$CONFIG" = "auto" ]; then
+            semgrep scan \
+              --config p/php \
+              --config p/security-audit \
+              --config p/secrets \
+              --metrics=off \
+              --timeout 60 \
+              --json -o reports/semgrep.json src/wp_plugins
+          else
+            semgrep scan \
+              --config "$CONFIG" \
+              --metrics=off \
+              --timeout 60 \
+              --json -o reports/semgrep.json src/wp_plugins
+          fi
       - name: Write Markdown Summary
+        shell: bash
         run: |
+          set -euo pipefail
           echo "## 🧪 Semgrep Summary" >> "$GITHUB_STEP_SUMMARY"
           if [ -s reports/semgrep.json ]; then
             TOTAL=$(jq '.results | length // 0' reports/semgrep.json)
@@ -68,16 +165,21 @@ jobs:
               | "| \(.severity) | \(.check_id) | \(.path):\(.start) | \(.message | gsub("\\n"; " ")) |"
             ' reports/semgrep.json | head -n 10 >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "- Semgrep produced no JSON. Check PHP file listing above." >> "$GITHUB_STEP_SUMMARY"
+            echo "- Semgrep produced no JSON (likely no matching files). Check the PHP file listing step." >> "$GITHUB_STEP_SUMMARY"
           fi
-
-      - name: Upload SARIF to GitHub
-        if: exists('reports/semgrep.sarif')
+      - name: Upload SARIF if exists
+        shell: bash
         run: |
-          echo "Uploading SARIF to GitHub code scanning..."
-          gh api --method POST -H "Accept: application/vnd.github+json" \
-            /repos/${{ github.repository }}/code-scanning/sarifs \
-            -F "sarif=@reports/semgrep.sarif" \
-            -F "commit_sha=${{ github.sha }}"
+          set -euo pipefail
+          if [ -f reports/semgrep.sarif ]; then
+            echo "Uploading SARIF to GitHub code scanning..."
+            gh api --method POST -H "Accept: application/vnd.github+json" \
+              /repos/${{ github.repository }}/code-scanning/sarifs \
+              -F "sarif=@reports/semgrep.sarif" \
+              -F "commit_sha=${{ github.sha }}" || true
+          else
+            echo "No SARIF found — skipping upload"
+            ls -la reports || true
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
